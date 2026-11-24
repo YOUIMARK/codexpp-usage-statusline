@@ -4,6 +4,10 @@
   // 算好的读数作为服务 codexpp.usage 提供：cached(threadId?) → { speed, decodeSpeed, outputThroughput, cache, context, stale, modelContextWindow } | null。
   codexPlus.extension((ctx) => {
     codexPlusUsageHost.call = (route, payload) => ctx.call(route, payload);
+    codexPlusUsageHost.readCompletedTurns = (threadId) => ctx.get("sessionQuery")?.filterEvents(threadId, {
+      types: ["turn/complete"],
+      limit: Number.MAX_SAFE_INTEGER,
+    });
     codexPlusUsageHost.diagnose = (event, detail) => ctx.call("/diagnostics/log", { event, detail: detail || {} }).catch(() => {});
     codexPlusUsageHost.legacySessionId = () => codexPlus.currentSession().id;
 

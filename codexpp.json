@@ -1,7 +1,7 @@
 {
   "id": "usage-statusline",
   "name": "用量状态栏",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "在输入框下方显示解码速度、缓存命中率、Token 用量和上下文占用，提供 DSH 风格的紧凑明细浮层。数据来自本机 Codex 会话与请求记录，不改变请求内容。",
   "engines": {
     "codexpp": 1

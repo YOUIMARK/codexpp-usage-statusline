@@ -31,6 +31,7 @@
   /** main.js 在拓展装上时填好：调清单里声明的路由、写诊断日志、取 Codex++ 认的当前会话 id。 */
   const codexPlusUsageHost = {
     call: () => Promise.reject(new Error("用量状态栏还没装上")),
+    readCompletedTurns: () => null,
     diagnose: () => {},
     legacySessionId: () => "",
   };
@@ -69,6 +70,8 @@
     inFlight: false,
     lastFingerprint: "",
     cache: new Map(),
+    durations: new Map(),
+    durationReads: new Map(),
     turnUsage: new Map(),
     turnUsageInFlight: new Map(),
     turnUsageLiveInFlight: new Map(),
@@ -89,29 +92,15 @@
 
   const codexPlusUsageSvgNs = "http://www.w3.org/2000/svg";
 
-  /**
-   * 速度项只显示数字，名称和口径放在悬停提示里。主值是首 token 之后的纯解码速度；
-   * rollout 还能算出含首 token 等待和工具执行的输出吞吐，只放在提示里作对比。
-   */
   function codexPlusUsageText() {
     const language = (document.documentElement?.lang || navigator.language || "").toLowerCase();
     return language.startsWith("zh")
       ? {
         speed: (value) => `${value} tok/s`,
-        ttft: (value) => `首 token ${value}`,
         cache: (value) => `缓存命中 ${value}`,
         context: (value) => value,
         turnUsage: (value) => `${value} tokens`,
         aria: "用量状态栏",
-        separator: "：",
-        comma: "，",
-        speedTitle: (value) => `解码速度（decode_tps）${value} tok/s（最近最多 10 次已完成请求的加权平均，按输出 token ÷ 首 token 后的生成耗时；不含首 token 等待和工具执行，并忽略不足 50ms 或超过 5000 tok/s 的异常样本）`,
-        ttftTitle: (value) => `首 token 延迟 ${value}s（最近最多 10 次成功请求的加权平均，按输出 token 加权，包含排队与提示词处理）`,
-        callTitle: (value) => `模型调用吞吐（call_tps）${value} tok/s（最近最多 10 次成功请求，输出 token ÷ 完整请求耗时；含首 token 等待，不含工具执行）`,
-        throughputTitle: (value) => `整轮近似吞吐 ${value} tok/s（由 rollout 相邻 token 事件估算，包含首 token 等待、工具和轮次内等待；不是精确的 e2e_tps，仅作对比）`,
-        cacheTitle: (value) => `缓存命中 ${value}`,
-        contextTitle: (value) => `上下文占用 ${value}`,
-        windowTitle: (value) => `窗口 ${value}`,
         turnUsageTitle: (usage) => [
           `本条消息 ${codexPlusUsageFormatNumber(usage.total)} tokens`,
           `输入 ${codexPlusUsageFormatNumber(usage.input)}`,
@@ -123,20 +112,10 @@
       }
       : {
         speed: (value) => `${value} tok/s`,
-        ttft: (value) => `first token ${value}`,
         cache: (value) => `cache hit ${value}`,
         context: (value) => value,
         turnUsage: (value) => `${value} tokens`,
         aria: "Usage status line",
-        separator: ": ",
-        comma: ", ",
-        speedTitle: (value) => `Decode speed (decode_tps) ${value} tok/s (token-weighted average of up to 10 completed requests, using output tokens ÷ generation time after the first token; excludes first-token wait and tool runs, and ignores anomalous samples below 50ms or above 5000 tok/s)`,
-        ttftTitle: (value) => `First-token latency ${value}s (token-weighted average of up to 10 successful requests, including queueing and prompt processing)`,
-        callTitle: (value) => `Model-call throughput (call_tps) ${value} tok/s (up to 10 successful requests, output tokens ÷ full request time; includes first-token wait and excludes tool runs)`,
-        throughputTitle: (value) => `Approximate turn throughput ${value} tok/s (estimated from adjacent rollout token events and includes first-token wait, tools, and in-turn waiting; not exact e2e_tps, shown only for comparison)`,
-        cacheTitle: (value) => `Cache hit ${value}`,
-        contextTitle: (value) => `Context used ${value}`,
-        windowTitle: (value) => `window ${value}`,
         turnUsageTitle: (usage) => [
           `This message used ${codexPlusUsageFormatNumber(usage.total)} tokens`,
           `input ${codexPlusUsageFormatNumber(usage.input)}`,
@@ -161,12 +140,13 @@
     style.id = codexPlusUsageStyleId;
     style.dataset.codexPlusExt = codexPlusUsageOwner;
     style.textContent = `
-      #${codexPlusUsageStatusLineId}{display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:4px 6px;box-sizing:border-box;width:100%;margin:5px 0 0;padding:0 8px;font:inherit;font-size:12px;line-height:17px;color:var(--color-token-text-secondary,CanvasText);user-select:none}
+      #${codexPlusUsageStatusLineId}{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:4px 12px;box-sizing:border-box;width:100%;max-width:660px;margin:5px auto 0;padding:0 8px;font:inherit;font-size:12px;line-height:17px;color:var(--color-token-text-secondary,CanvasText);user-select:none}
       /* 插槽已经提供上间距，迁入时不能再叠一份，否则输入框会向上跳 6px。 */
       [data-codex-plus-ui-slot="composer.below"] #${codexPlusUsageStatusLineId}{margin-top:0}
       #${codexPlusUsageStatusLineId}[data-hidden="true"]{display:none}
-      #${codexPlusUsageStatusLineId} .codex-plus-usage-group{position:relative;min-width:0}
-      #${codexPlusUsageStatusLineId} .codex-plus-usage-item{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-height:27px;padding:3px 8px;border:1px solid transparent;border-radius:5px;background:transparent;color:inherit;font:inherit;line-height:17px;white-space:nowrap;font-variant-numeric:tabular-nums;cursor:pointer;transition:background-color .15s,border-color .15s}
+      #${codexPlusUsageStatusLineId} .codex-plus-usage-group{position:relative;display:flex;flex:1 0 auto;justify-content:center;max-width:100%}
+      #${codexPlusUsageStatusLineId} .codex-plus-usage-group[data-usage="duration"]{min-width:130px}
+      #${codexPlusUsageStatusLineId} .codex-plus-usage-item{display:inline-flex;align-items:center;gap:5px;max-width:100%;min-height:25px;padding:2px 8px;border:1px solid transparent;border-radius:5px;background:transparent;color:inherit;font:inherit;line-height:17px;white-space:nowrap;font-variant-numeric:tabular-nums;cursor:pointer;transition:background-color .15s,border-color .15s}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-item:hover,#${codexPlusUsageStatusLineId} .codex-plus-usage-item[aria-expanded="true"]{border-color:var(--color-token-border-secondary,color-mix(in srgb,CanvasText 14%,Canvas));background:var(--color-token-bg-secondary,color-mix(in srgb,CanvasText 6%,Canvas))}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-item:focus-visible{outline:2px solid #6688ef;outline-offset:1px}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-value{font-weight:550}
@@ -175,6 +155,7 @@
       #${codexPlusUsageStatusLineId} .codex-plus-usage-popover{position:absolute;z-index:1000;bottom:calc(100% + 8px);left:0;width:270px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);overflow:auto;padding:14px 15px 11px;border:1px solid var(--color-token-border-secondary,color-mix(in srgb,CanvasText 14%,Canvas));border-radius:8px;background:var(--color-token-bg-primary,Canvas);box-shadow:0 8px 24px rgba(20,27,35,.12);color:var(--color-token-text-primary,CanvasText);white-space:normal;font:inherit;text-align:left}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-group[data-usage="cache"] .codex-plus-usage-popover{left:50%;transform:translateX(-50%)}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-group[data-usage="context"] .codex-plus-usage-popover{right:0;left:auto}
+      #${codexPlusUsageStatusLineId} .codex-plus-usage-group[data-usage="duration"] .codex-plus-usage-popover{right:0;left:auto}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-popover[hidden]{display:none}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-popover-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;font-size:13px;font-weight:500;color:var(--color-token-text-primary,CanvasText)}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-title-label{display:inline-flex;align-items:center;gap:6px;min-width:0}
@@ -185,11 +166,7 @@
       #${codexPlusUsageStatusLineId} .codex-plus-usage-row strong{color:var(--color-token-text-primary,CanvasText);font-weight:500;font-variant-numeric:tabular-nums;text-align:right}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-meter{height:4px;margin:8px 0 10px;overflow:hidden;border-radius:4px;background:color-mix(in srgb,CanvasText 10%,Canvas)}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-meter-fill{height:100%;width:0;border-radius:inherit;background:#7378ed;transition:width .2s}
-      #${codexPlusUsageStatusLineId} .codex-plus-usage-legal{margin-top:8px;padding-top:8px;border-top:1px solid var(--color-token-border-secondary,color-mix(in srgb,CanvasText 14%,Canvas));color:color-mix(in srgb,CanvasText 52%,transparent);font-size:10px}
-      #${codexPlusUsageStatusLineId} .codex-plus-usage-legal a{color:inherit;text-decoration:underline;text-underline-offset:2px}
       .turn-action-controls>[data-codex-plus-turn-usage]{display:inline-flex;align-items:center;min-height:20px;margin-left:6px;color:var(--color-token-text-tertiary,rgba(180,180,190,.86));font-size:12px;line-height:17px;font-variant-numeric:tabular-nums;white-space:nowrap;user-select:none}
-      /* 本轮结束超过阈值只淡化速度：缓存命中与上下文占用仍然是当前值，不该跟着变灰。 */
-      #${codexPlusUsageStatusLineId}[data-stale="true"] .codex-plus-usage-item[data-usage="speed"]{opacity:.55}
     `;
     document.head?.appendChild(style);
   }
@@ -301,19 +278,18 @@
         { tag: "path", attrs: { d: "M2 12.5a6 6 0 0 1 12 0" } },
         { tag: "path", attrs: { d: "M8 12.5 10.8 8.6" } },
       ]).svg),
-      ttft: codexPlusUsageItem(node, "ttft", "ttft", codexPlusUsageIcon([
-        { tag: "circle", attrs: { cx: "8", cy: "8", r: "5.8" } },
-        { tag: "path", attrs: { d: "M8 4.5V8l2.4 1.6" } },
-      ]).svg),
       cache: codexPlusUsageItem(node, "cache", "cache", codexPlusUsageIcon([
         { tag: "path", attrs: { d: "M8 2.2c2.5 0 4.5.8 4.5 1.8S10.5 5.8 8 5.8 3.5 5 3.5 4 5.5 2.2 8 2.2Z" } },
         { tag: "path", attrs: { d: "M3.5 4v8c0 1 2 1.8 4.5 1.8s4.5-.8 4.5-1.8V4" } },
         { tag: "path", attrs: { d: "M3.5 8c0 1 2 1.8 4.5 1.8S12.5 9 12.5 8" } },
       ]).svg),
+      duration: codexPlusUsageItem(node, "duration", "本对话总耗时", codexPlusUsageIcon([
+        { tag: "circle", attrs: { cx: "8", cy: "8", r: "6" } },
+        { tag: "path", attrs: { d: "M8 4.5V8l2.3 1.5" } },
+      ]).svg),
       context: codexPlusUsageItem(node, "context", "context", ring.svg),
       ring: ring.ring,
     };
-    parts.ttft.group.hidden = true;
     parts.speed.popover.setAttribute("aria-label", "会话统计");
     parts.speed.titleLabel.textContent = "会话统计";
     parts.speed.hero = document.createElement("div");
@@ -339,7 +315,6 @@
     parts.cache.amount.className = "codex-plus-usage-value";
     parts.cache.item.insertBefore(parts.cache.separator, parts.cache.value);
     parts.cache.item.insertBefore(parts.cache.amount, parts.cache.separator);
-    parts.cache.popover.appendChild(codexPlusUsagePopoverLegal());
 
     parts.context.titleLabel.textContent = "上下文占用";
     parts.context.meter = document.createElement("div");
@@ -348,7 +323,11 @@
     parts.context.meterFill.className = "codex-plus-usage-meter-fill";
     parts.context.meter.appendChild(parts.context.meterFill);
     parts.context.popover.appendChild(parts.context.meter);
-    parts.context.popover.appendChild(codexPlusUsagePopoverLegal());
+
+    const durationLabel = document.createElement("span");
+    durationLabel.textContent = "总耗时";
+    parts.duration.item.insertBefore(durationLabel, parts.duration.value);
+    parts.duration.rounds = codexPlusUsagePopoverRow(parts.duration.popover, "已计时轮次");
 
     const clickHandler = (event) => {
       const target = event.target instanceof Element ? event.target : null;
@@ -371,18 +350,6 @@
     };
     codexPlusUsageState.parts = parts;
     return parts;
-  }
-
-  function codexPlusUsagePopoverLegal() {
-    const footer = document.createElement("div");
-    footer.className = "codex-plus-usage-legal";
-    const source = document.createElement("a");
-    source.href = "https://github.com/BigPizzaV3/CodexPlusPlus/tree/main/assets/extensions/usage-statusline";
-    source.target = "_blank";
-    source.rel = "noreferrer";
-    source.textContent = "官方采集引擎 · AGPL-3.0";
-    footer.appendChild(source);
-    return footer;
   }
 
   /** 当前版本 Codex（26.825 起）的输入卡片。 */
@@ -916,7 +883,6 @@
   /**
    * 主速度位的取值：优先 decode_tps；请求日志没有样本时（直连上游、不走本地代理的 profile）
    * 退回 rollout 推算的整轮近似吞吐，不能比改版前更差地永久显示 `--`。
-   * `source` 决定悬停文案用哪种口径，避免把近似吞吐标成 decode_tps。
    */
   function codexPlusUsageSpeedDisplay(snapshot) {
     const usable = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
@@ -932,12 +898,8 @@
     if (!node?.isConnected) return;
     const parts = codexPlusUsageState.parts || codexPlusUsageBuild(node);
     const text = codexPlusUsageText();
-    const format = (value) => (value === null || value === undefined || Number.isNaN(value) ? "--" : value);
     const speedDisplay = codexPlusUsageSpeedDisplay(snapshot);
     const speed = speedDisplay.value;
-    // 主速度位已经在显示近似吞吐时，悬停里不再重复一条同值的近似吞吐。
-    const speedFromThroughput = speedDisplay.source === "throughput";
-    const speedTitle = speedFromThroughput ? text.throughputTitle(speed) : text.speedTitle(format(speed));
     const firstToken = snapshot?.firstTokenMs == null
       ? "--"
       : `${(Math.max(0, snapshot.firstTokenMs) / 1000).toFixed(1)}s`;
@@ -950,23 +912,28 @@
     const cache = snapshot?.cache == null ? "--" : `${snapshot.cache.toFixed(1)}%`;
     const context = snapshot?.context == null ? "--" : `${Math.round(snapshot.context)}%`;
     const turnTokens = snapshot?.turnTokens || {};
-    const stale = snapshot?.stale === true;
     const contextWindow = snapshot?.modelContextWindow || 0;
     // 指纹一样就不写 DOM：每秒一次无意义赋值会让 Codex 的 MutationObserver 空转。
-    const fingerprint = [speed, speedDisplay.source, firstToken, callTps, outputThroughput, cache, context, stale, contextWindow, snapshot?.contextTokens, turnTokens.input, turnTokens.cached, turnTokens.output].join("|");
+    const duration = codexPlusUsageState.durations.get(codexPlusUsageState.threadId);
+    const durationText = codexPlusUsageFormatDuration(duration?.seconds);
+    const fingerprint = [speed, speedDisplay.source, firstToken, callTps, outputThroughput, cache, context, contextWindow, snapshot?.contextTokens, turnTokens.input, turnTokens.cached, turnTokens.output, durationText, duration?.rounds].join("|");
     if (fingerprint === codexPlusUsageState.lastFingerprint) return;
     codexPlusUsageState.lastFingerprint = fingerprint;
 
     parts.speed.value.textContent = text.speed(speed);
-    parts.ttft.value.textContent = text.ttft(firstToken);
     parts.cache.value.textContent = text.cache(cache);
     parts.cache.amount.textContent = `${codexPlusUsageFormatCompact(turnTokens.total)} tok`;
     parts.context.value.textContent = text.context(context);
-    parts.speed.item.setAttribute("aria-label", `会话统计，${text.speed(speed)}`);
+    parts.duration.value.textContent = durationText;
+    parts.duration.titleValue.textContent = durationText;
+    parts.duration.rounds.textContent = duration ? String(duration.rounds) : "--";
+    parts.duration.item.setAttribute("aria-label", `本对话总耗时，${durationText}`);
+    const speedLabel = speedDisplay.source === "throughput" ? "本轮近似吞吐" : "解码速度";
+    parts.speed.item.setAttribute("aria-label", `会话统计，${speedLabel} ${text.speed(speed)}`);
     parts.cache.item.setAttribute("aria-label", `Token 用量，${codexPlusUsageFormatCompact(turnTokens.total)} tok，缓存命中 ${cache}`);
     parts.context.item.setAttribute("aria-label", `上下文占用，${context}`);
     parts.speed.hero.textContent = text.speed(speed);
-    parts.speed.popoverRows.ttft.textContent = text.ttft(firstToken);
+    parts.speed.popoverRows.ttft.textContent = firstToken;
     parts.speed.popoverRows.callTps.textContent = callTps == null ? "--" : `${callTps} tok/s`;
     parts.speed.popoverRows.throughput.textContent = outputThroughput == null ? "--" : `${outputThroughput} tok/s`;
     parts.cache.titleValue.textContent = `${codexPlusUsageFormatNumber(turnTokens.total)} tok`;
@@ -981,17 +948,44 @@
       const filled = snapshot?.context == null ? 0 : (snapshot.context / 100) * codexPlusUsageRingCircumference;
       parts.ring.setAttribute("stroke-dasharray", `${filled.toFixed(2)} ${codexPlusUsageRingCircumference}`);
     }
-    node.dataset.stale = String(stale);
-    node.setAttribute("title", [
-      speedTitle,
-      text.ttftTitle(firstToken === "--" ? "--" : firstToken.replace(/s$/, "")),
-      callTps == null ? "" : text.callTitle(format(callTps)),
-      outputThroughput == null || speedFromThroughput ? "" : text.throughputTitle(format(outputThroughput)),
-      text.cacheTitle(format(cache)),
-      text.contextTitle(format(context)),
-      contextWindow > 0 ? text.windowTitle(codexPlusUsageFormatNumber(contextWindow)) : "",
-    ].filter(Boolean).join(" · "));
-    node.setAttribute("aria-label", `${text.aria}${text.separator}${[speedTitle, text.ttft(firstToken), text.cache(cache), context].join(text.comma)}`);
+    node.setAttribute("aria-label", text.aria);
+  }
+
+  function codexPlusUsageFormatDuration(seconds) {
+    if (seconds == null) return "--";
+    const units = [[86400, "天"], [3600, "时"], [60, "分"], [1, "秒"]];
+    return units.map(([size, label], index) => {
+      const amount = Math.floor(seconds / size) % (index === 0 ? Infinity : units[index - 1][0] / size);
+      return amount ? `${amount}${label}` : "";
+    }).join("") || "0秒";
+  }
+
+  function codexPlusUsageTotalDuration(events) {
+    const byTurn = new Map();
+    for (const event of events) {
+      const { turn, durationMs } = event.data || {};
+      if (event.type !== "turn/complete" || !turn || !Number.isFinite(durationMs) || durationMs < 0) continue;
+      byTurn.set(turn, Math.floor(durationMs / 1000));
+    }
+    return { seconds: [...byTurn.values()].reduce((total, seconds) => total + seconds, 0), rounds: byTurn.size };
+  }
+
+  async function codexPlusUsageRefreshDuration(threadId) {
+    const read = Symbol();
+    codexPlusUsageState.durationReads.set(threadId, read);
+    try {
+      const events = await codexPlusUsageHost.readCompletedTurns(threadId);
+      if (codexPlusUsageState.durationReads.get(threadId) !== read || !Array.isArray(events)) return;
+      const duration = codexPlusUsageTotalDuration(events);
+      if (duration.rounds) codexPlusUsageState.durations.set(threadId, duration);
+      if (codexPlusUsageState.threadId === threadId) {
+        codexPlusUsageRender(codexPlusUsageSnapshot(codexPlusUsageState.cache.get(threadId)));
+      }
+    } catch {
+      return;
+    } finally {
+      if (codexPlusUsageState.durationReads.get(threadId) === read) codexPlusUsageState.durationReads.delete(threadId);
+    }
   }
 
   function codexPlusUsageFormatCompact(value) {
@@ -1212,7 +1206,10 @@
     codexPlusUsageShow(node);
     codexPlusUsageRender(codexPlusUsageSnapshot(codexPlusUsageState.cache.get(threadId)));
     codexPlusUsageRenderTurnUsage(threadId);
-    if (changed) void codexPlusUsageRefreshTurnUsage(threadId);
+    if (changed) {
+      void codexPlusUsageRefreshTurnUsage(threadId);
+      void codexPlusUsageRefreshDuration(threadId);
+    }
     return { card, threadId, changed };
   }
 
@@ -1240,6 +1237,7 @@
     if (!current) return;
     const completed = codexPlusUsageValidThreadId(threadId);
     if (completed && completed !== current) return;
+    void codexPlusUsageRefreshDuration(current);
     void codexPlusUsageRefreshLiveTurnUsage(current);
   }
 
@@ -1416,6 +1414,8 @@
     codexPlusUsageState.parts = null;
     codexPlusUsageState.lastFingerprint = "";
     codexPlusUsageState.cache.clear();
+    codexPlusUsageState.durations.clear();
+    codexPlusUsageState.durationReads.clear();
     codexPlusUsageState.turnUsage.clear();
     codexPlusUsageState.turnUsageInFlight.clear();
     codexPlusUsageState.turnUsageLiveInFlight.clear();
